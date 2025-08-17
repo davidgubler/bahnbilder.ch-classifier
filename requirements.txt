@@ -3,3 +3,6 @@ transformers==4.49.0
 pillow
 einops
 timm
+pymongo
+paddlepaddle
+paddleocr
