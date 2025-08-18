@@ -2,12 +2,13 @@ import gc
 
 import torch
 from PIL import Image
+from PIL.ImageTransform import PerspectiveTransform
 from transformers import AutoProcessor, AutoModelForCausalLM
-from paddleocr import TextDetection
+from paddleocr import TextDetection, TextRecognition, TextImageUnwarping
 import os, io, sys
 from numpy import asarray
-import numpy as np
 from pymongo import MongoClient
+import numpy as np
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -17,6 +18,9 @@ od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", tru
 
 td_model = TextDetection(model_name="PP-OCRv5_server_det", limit_side_len=100000)
 
+ocr_model = TextRecognition(model_name="latin_PP-OCRv5_mobile_rec") # not particularly good but avoids mess with non-latin characters
+#ocr_model = TextRecognition(model_name="PP-OCRv5_server_rec") # looses spaces
+#ocr_model = TextRecognition(model_name="en_PP-OCRv4_mobile_rec") # not great
 
 
 def mongo_connect():
@@ -64,19 +68,52 @@ def train_bounding_box(image):
         return None
 
 
+def extract_texts_florence2(image):
+    inputs = od_processor(text="<OCR>", images=image, return_tensors="pt").to(device, torch_dtype)
+    generated_ids = od_model.generate(
+        input_ids=inputs["input_ids"],
+        pixel_values=inputs["pixel_values"],
+        max_new_tokens=4096,
+        num_beams=3,
+        do_sample=False
+    )
+    generated_text = od_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    parsed_answer = od_processor.post_process_generation(generated_text, task="<OCR>",
+                                                         image_size=(image.width, image.height))
+    print(parsed_answer)
+
+
+def extract_texts_paddle(image):
+    output = ocr_model.predict(asarray(image), batch_size=1)
+    print(output[0]["rec_text"] + ": " + "%.2f" % output[0]["rec_score"])
+
+
 def coords_to_bounding_box(coords):
     min_x = 1000000
-    max_x = 0
     min_y = 1000000
+    max_x = 0
     max_y = 0
     for coord in coords:
         min_x = min(min_x, coord[0])
-        max_x = max(max_x, coord[0])
         min_y = min(min_y, coord[1])
+        max_x = max(max_x, coord[0])
         max_y = max(max_y, coord[1])
     return [min_x, min_y, max_x, max_y]
 
 
+
+def image_crop_and_transform(image, coords):
+    bounding_box = coords_to_bounding_box(coords)
+
+    print("top left bounding box:     %d %d" % (bounding_box[0], bounding_box[1]))
+    print("top right bounding box:    %d %d" % (bounding_box[2], bounding_box[1]))
+    print("bottom right bounding box: %d %d" % (bounding_box[2], bounding_box[3]))
+    print("bottom left bounding box:  %d %d" % (bounding_box[0], bounding_box[3]))
+
+
+    np.set_printoptions(threshold=sys.maxsize)
+    print(coords)
+    print(bounding_box)
 
 
 try:
@@ -93,7 +130,7 @@ try:
     if photo_without_texts != None:
         print(photo_without_texts["numId"])
         #jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
-        jpeg = coll_files.find_one({"photoId": 60156})
+        jpeg = coll_files.find_one({"photoId": 60360})
         image = Image.open(io.BytesIO(jpeg["data"]))
         bounding_box = train_bounding_box(image)
         if bounding_box != None:
@@ -103,9 +140,7 @@ try:
 
             # Text detection quality improves a lot with upscaling...
             image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
-
             output = td_model.predict(asarray(image), batch_size=1)
-            np.set_printoptions(threshold=sys.maxsize)
 
             text_images = []
             for dt_poly in output[0]["dt_polys"]:
@@ -114,6 +149,8 @@ try:
                 i = len(text_images) - 1
                 text_images[i].save(f"cropped_text_{i}.jpg")
 
+                #extract_texts_florence2(text_images[i])
+                extract_texts_paddle(text_images[i])
 
 
         else:
