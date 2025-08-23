@@ -10,6 +10,13 @@ from numpy import asarray
 from pymongo import MongoClient
 import numpy as np
 
+from surya.common.surya.schema import TaskNames
+from surya.debug.text import draw_text_on_image
+from surya.logging import configure_logging, get_logger
+from surya.foundation import FoundationPredictor
+from surya.recognition import RecognitionPredictor
+from surya.scripts.config import CLILoader
+
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
@@ -150,7 +157,21 @@ try:
                 text_images[i].save(f"cropped_text_{i}.jpg")
 
                 #extract_texts_florence2(text_images[i])
-                extract_texts_paddle(text_images[i])
+                #extract_texts_paddle(text_images[i])
+
+                foundation_predictor = FoundationPredictor()
+                rec_predictor = RecognitionPredictor(foundation_predictor)
+                predictions_by_image = rec_predictor(
+                    [image],
+                    task_names=["ocr_without_boxes"],
+                    # det_predictor=det_predictor,
+                    bboxes=[[bb]],
+                    #highres_images=loader.highres_images,
+                    math_mode=True,
+                )
+                print("%s %.2f" % (predictions_by_image[0].text_lines[0].text, predictions_by_image[0].text_lines[0].confidence))
+                #for key, value in predictions_by_image[0].items():
+                #    print(key, value)
 
 
         else:
