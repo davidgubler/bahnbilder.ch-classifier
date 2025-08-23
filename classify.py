@@ -135,7 +135,7 @@ try:
     if photo_without_texts != None:
         print(photo_without_texts["numId"])
         #jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
-        jpeg = coll_files.find_one({"photoId": 59860})
+        jpeg = coll_files.find_one({"photoId": 56760})
         image = Image.open(io.BytesIO(jpeg["data"]))
         bounding_box = train_bounding_box(image)
         if bounding_box != None:
@@ -168,7 +168,8 @@ try:
                 math_mode=False,
             )
             for prediction in predictions_by_image:
-                print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
+                if prediction.text_lines[0].confidence > 0.6:
+                    print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
 
         else:
             print("train not found!")
