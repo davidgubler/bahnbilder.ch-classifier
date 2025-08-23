@@ -2,7 +2,6 @@ import gc
 
 import torch
 from PIL import Image
-from PIL.ImageTransform import PerspectiveTransform
 from transformers import AutoProcessor, AutoModelForCausalLM
 from paddleocr import TextDetection, TextRecognition, TextImageUnwarping
 import os, io, sys
@@ -10,12 +9,8 @@ from numpy import asarray
 from pymongo import MongoClient
 import numpy as np
 
-from surya.common.surya.schema import TaskNames
-from surya.debug.text import draw_text_on_image
-from surya.logging import configure_logging, get_logger
 from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
-from surya.scripts.config import CLILoader
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
@@ -28,6 +23,9 @@ td_model = TextDetection(model_name="PP-OCRv5_server_det", limit_side_len=100000
 ocr_model = TextRecognition(model_name="latin_PP-OCRv5_mobile_rec") # not particularly good but avoids mess with non-latin characters
 #ocr_model = TextRecognition(model_name="PP-OCRv5_server_rec") # looses spaces
 #ocr_model = TextRecognition(model_name="en_PP-OCRv4_mobile_rec") # not great
+
+
+surya_rec_predictor = RecognitionPredictor(FoundationPredictor())
 
 
 def mongo_connect():
@@ -137,7 +135,7 @@ try:
     if photo_without_texts != None:
         print(photo_without_texts["numId"])
         #jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
-        jpeg = coll_files.find_one({"photoId": 60360})
+        jpeg = coll_files.find_one({"photoId": 59860})
         image = Image.open(io.BytesIO(jpeg["data"]))
         bounding_box = train_bounding_box(image)
         if bounding_box != None:
@@ -150,29 +148,27 @@ try:
             output = td_model.predict(asarray(image), batch_size=1)
 
             text_images = []
+
+            polygons = []
+
             for dt_poly in output[0]["dt_polys"]:
                 bb = coords_to_bounding_box(dt_poly)
                 text_images.append(image.crop(coords_to_bounding_box(dt_poly)))
                 i = len(text_images) - 1
                 text_images[i].save(f"cropped_text_{i}.jpg")
+                polygons.append([dt_poly])
 
-                #extract_texts_florence2(text_images[i])
-                #extract_texts_paddle(text_images[i])
+            images = [image] * len(polygons)
+            task_names = ["ocr_without_boxes"] * len(polygons)
 
-                foundation_predictor = FoundationPredictor()
-                rec_predictor = RecognitionPredictor(foundation_predictor)
-                predictions_by_image = rec_predictor(
-                    [image],
-                    task_names=["ocr_without_boxes"],
-                    # det_predictor=det_predictor,
-                    bboxes=[[bb]],
-                    #highres_images=loader.highres_images,
-                    math_mode=True,
-                )
-                print("%s %.2f" % (predictions_by_image[0].text_lines[0].text, predictions_by_image[0].text_lines[0].confidence))
-                #for key, value in predictions_by_image[0].items():
-                #    print(key, value)
-
+            predictions_by_image = surya_rec_predictor(
+                images=images,
+                task_names=task_names,
+                polygons=polygons,
+                math_mode=False,
+            )
+            for prediction in predictions_by_image:
+                print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
 
         else:
             print("train not found!")
