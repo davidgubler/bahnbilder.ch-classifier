@@ -1,13 +1,10 @@
-import gc
-
-import torch
+import torch, json, time
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM
-from paddleocr import TextDetection, TextRecognition, TextImageUnwarping
+from paddleocr import TextDetection
 import os, io, sys
 from numpy import asarray
 from pymongo import MongoClient
-import numpy as np
 
 from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
@@ -19,11 +16,6 @@ od_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base-ft", 
 od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
 
 td_model = TextDetection(model_name="PP-OCRv5_server_det", limit_side_len=100000)
-
-ocr_model = TextRecognition(model_name="latin_PP-OCRv5_mobile_rec") # not particularly good but avoids mess with non-latin characters
-#ocr_model = TextRecognition(model_name="PP-OCRv5_server_rec") # looses spaces
-#ocr_model = TextRecognition(model_name="en_PP-OCRv4_mobile_rec") # not great
-
 
 surya_rec_predictor = RecognitionPredictor(FoundationPredictor())
 
@@ -73,26 +65,6 @@ def train_bounding_box(image):
         return None
 
 
-def extract_texts_florence2(image):
-    inputs = od_processor(text="<OCR>", images=image, return_tensors="pt").to(device, torch_dtype)
-    generated_ids = od_model.generate(
-        input_ids=inputs["input_ids"],
-        pixel_values=inputs["pixel_values"],
-        max_new_tokens=4096,
-        num_beams=3,
-        do_sample=False
-    )
-    generated_text = od_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-    parsed_answer = od_processor.post_process_generation(generated_text, task="<OCR>",
-                                                         image_size=(image.width, image.height))
-    print(parsed_answer)
-
-
-def extract_texts_paddle(image):
-    output = ocr_model.predict(asarray(image), batch_size=1)
-    print(output[0]["rec_text"] + ": " + "%.2f" % output[0]["rec_score"])
-
-
 def coords_to_bounding_box(coords):
     min_x = 1000000
     min_y = 1000000
@@ -107,20 +79,6 @@ def coords_to_bounding_box(coords):
 
 
 
-def image_crop_and_transform(image, coords):
-    bounding_box = coords_to_bounding_box(coords)
-
-    print("top left bounding box:     %d %d" % (bounding_box[0], bounding_box[1]))
-    print("top right bounding box:    %d %d" % (bounding_box[2], bounding_box[1]))
-    print("bottom right bounding box: %d %d" % (bounding_box[2], bounding_box[3]))
-    print("bottom left bounding box:  %d %d" % (bounding_box[0], bounding_box[3]))
-
-
-    np.set_printoptions(threshold=sys.maxsize)
-    print(coords)
-    print(bounding_box)
-
-
 try:
     client = mongo_connect()
 
@@ -129,17 +87,23 @@ try:
 
     coll_photos = db_bahnbilder["photos"]
     coll_files = db_bahnbilder_files_original["files"]
+    blacklist_numIds = []
 
-    photo_without_texts = coll_photos.find_one({"texts": None})
-
-    if photo_without_texts != None:
+    while True:
+        photo_without_texts = coll_photos.find_one({"texts": None, "numId": { "$nin": blacklist_numIds } })
+        if photo_without_texts == None:
+            break
+        blacklist_numIds.append(photo_without_texts["numId"])
+        texts = []
         print(photo_without_texts["numId"])
-        #jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
-        jpeg = coll_files.find_one({"photoId": 56760})
+        jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
+        if jpeg == None:
+            print("jpeg %d is missing!" % photo_without_texts["numId"])
+            continue
+
         image = Image.open(io.BytesIO(jpeg["data"]))
         bounding_box = train_bounding_box(image)
         if bounding_box != None:
-            print(bounding_box)
             image = image.crop(bounding_box)
             image.save("cropped.jpg", "JPEG")
 
@@ -170,10 +134,14 @@ try:
             for prediction in predictions_by_image:
                 if prediction.text_lines[0].confidence > 0.6:
                     print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
-
+                    texts.append(prediction.text_lines[0].text)
         else:
             print("train not found!")
 
+        print("setting texts for photo %d to %s" % (photo_without_texts["numId"], json.dumps(texts)))
+        filter = { "_id": photo_without_texts["_id"] }
+        update_op = { "$set": {"texts": texts } }
+        coll_photos.update_one(filter, update_op)
     client.close()
 
 except Exception as e:
