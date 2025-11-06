@@ -48,17 +48,17 @@ def mongo_connect():
 
 
 def train_bounding_box(image):
-    inputs = od_processor(text="<OD>", images=image, return_tensors="pt").to(device, torch_dtype)
-    generated_ids = od_model.generate(
-        input_ids=inputs["input_ids"],
-        pixel_values=inputs["pixel_values"],
-        max_new_tokens=4096,
-        num_beams=3,
-        do_sample=False
-    )
-    generated_text = od_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-    parsed_answer = od_processor.post_process_generation(generated_text, task="<OD>", image_size=(image.width, image.height))
     try:
+        inputs = od_processor(text="<OD>", images=image, return_tensors="pt").to(device, torch_dtype)
+        generated_ids = od_model.generate(
+            input_ids=inputs["input_ids"],
+            pixel_values=inputs["pixel_values"],
+            max_new_tokens=4096,
+            num_beams=3,
+            do_sample=False
+        )
+        generated_text = od_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = od_processor.post_process_generation(generated_text, task="<OD>", image_size=(image.width, image.height))
         train_index = parsed_answer["<OD>"]["labels"].index("train")
         return parsed_answer["<OD>"]["bboxes"][train_index]
     except Exception:
