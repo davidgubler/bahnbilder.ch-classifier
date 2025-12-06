@@ -92,15 +92,17 @@ try:
     while True:
         photo_without_texts = coll_photos.find_one({"texts": None, "numId": { "$nin": blacklist_numIds } })
         if photo_without_texts == None:
-            break
-        blacklist_numIds.append(photo_without_texts["numId"])
+            print("waiting for changes")
+            next(coll_photos.watch())
+            continue
         texts = []
         print(photo_without_texts["numId"])
         jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
         if jpeg == None:
             print("jpeg %d is missing!" % photo_without_texts["numId"])
+            time.sleep(0.1)
             continue
-
+        blacklist_numIds.append(photo_without_texts["numId"])
         image = Image.open(io.BytesIO(jpeg["data"]))
         bounding_box = train_bounding_box(image)
         if bounding_box != None:
