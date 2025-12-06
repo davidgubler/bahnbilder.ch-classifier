@@ -1,6 +1,6 @@
 import torch, json, time
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForCausalLM
+from transformers import AutoProcessor, Florence2ForConditionalGeneration, LlavaForConditionalGeneration
 from paddleocr import TextDetection
 import os, io, sys
 from numpy import asarray
@@ -12,13 +12,26 @@ from surya.recognition import RecognitionPredictor
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-od_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base-ft", torch_dtype=torch_dtype, trust_remote_code=True).to("cpu")
-od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
+#od_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base-ft", dtype="bfloat16", trust_remote_code=True, device_map="cpu").to("cpu")
+#od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
+od_model = Florence2ForConditionalGeneration.from_pretrained("florence-community/Florence-2-large", dtype=torch.bfloat16, device_map="cpu")
+od_processor = AutoProcessor.from_pretrained("florence-community/Florence-2-large")
+#od_model = Florence2ForConditionalGeneration.from_pretrained("microsoft/Florence-2-large", dtype=torch.bfloat16, device_map="cpu")
+#od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large")
 
 td_model = TextDetection(model_name="PP-OCRv5_server_det", limit_side_len=100000)
 
 surya_rec_predictor = RecognitionPredictor(FoundationPredictor())
 
+caption_model_name = "fancyfeast/llama-joycaption-beta-one-hf-llava"
+caption_processor = AutoProcessor.from_pretrained(caption_model_name)
+caption_model = LlavaForConditionalGeneration.from_pretrained(caption_model_name, dtype="bfloat16", device_map="cpu")
+caption_model_prompt = "Write a list of Booru-like tags for this image within 40 words."
+caption_model_convo = [
+    {"role": "system", "content": "You are a helpful image captioner."},
+    {"role": "user", "content": caption_model_prompt},
+]
+caption_model_convo_string = caption_processor.apply_chat_template(caption_model_convo, tokenize=False, add_generation_prompt=True)
 
 def mongo_connect():
     mongoHosts = os.environ.get("MONGO_HOSTS")
@@ -49,10 +62,9 @@ def mongo_connect():
 
 def train_bounding_box(image):
     try:
-        inputs = od_processor(text="<OD>", images=image, return_tensors="pt").to(device, torch_dtype)
+        inputs = od_processor(text="<OD>", images=image, return_tensors="pt").to("cpu", torch.bfloat16)
         generated_ids = od_model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
+            **inputs,
             max_new_tokens=4096,
             num_beams=3,
             do_sample=False
@@ -77,6 +89,57 @@ def coords_to_bounding_box(coords):
         max_y = max(max_y, coord[1])
     return [min_x, min_y, max_x, max_y]
 
+def generate_labels(photo, image, coll_photos):
+    photo_id = photo["numId"]
+    print(f"{photo_id}: generating labels")
+    inputs = caption_processor(text=[caption_model_convo_string], images=[image], return_tensors="pt").to("cpu")
+    inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
+    generate_ids = caption_model.generate(**inputs, max_new_tokens=300, do_sample=True, suppress_tokens=None, use_cache=True, temperature=0.6, top_k=None, top_p=0.9)[0]
+    caption = caption_processor.tokenizer.decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+    labels = caption.splitlines()[-1].split(", ")
+    print("setting labels for photo %d to %s" % (photo["numId"], json.dumps(labels)))
+    filter = { "_id": photo["_id"] }
+    update_op = { "$set": {"labels": labels } }
+    coll_photos.update_one(filter, update_op)
+
+def extract_texts(photo, image, coll_photos):
+    photo_id = photo["numId"]
+    print(f"{photo_id}: extracting texts")
+    bounding_box = train_bounding_box(image)
+    texts = []
+    if bounding_box != None:
+        image = image.crop(bounding_box)
+        image.save("cropped.jpg", "JPEG")
+        # Text detection quality improves a lot with upscaling...
+        image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
+        output = td_model.predict(asarray(image), batch_size=1)
+        text_images = []
+        polygons = []
+        for dt_poly in output[0]["dt_polys"]:
+            bb = coords_to_bounding_box(dt_poly)
+            text_images.append(image.crop(coords_to_bounding_box(dt_poly)))
+            i = len(text_images) - 1
+            text_images[i].save(f"cropped_text_{i}.jpg")
+            polygons.append([dt_poly])
+        images = [image] * len(polygons)
+        task_names = ["ocr_without_boxes"] * len(polygons)
+        predictions_by_image = surya_rec_predictor(
+            images=images,
+            task_names=task_names,
+            polygons=polygons,
+            math_mode=False,
+        )
+        for prediction in predictions_by_image:
+            if prediction.text_lines[0].confidence > 0.6:
+                print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
+                texts.append(prediction.text_lines[0].text)
+    else:
+        print("train not found!")
+    print("setting texts for photo %d to %s" % (photo["numId"], json.dumps(texts)))
+    filter = { "_id": photo["_id"] }
+    update_op = { "$set": {"texts": texts } }
+    coll_photos.update_one(filter, update_op)
+ 
 
 
 try:
@@ -90,60 +153,31 @@ try:
     blacklist_numIds = []
 
     while True:
-        photo_without_texts = coll_photos.find_one({"texts": None, "numId": { "$nin": blacklist_numIds } })
-        if photo_without_texts == None:
+        photo = coll_photos.find_one({"texts": None, "numId": { "$nin": blacklist_numIds } })
+        if photo == None:
+            photo = coll_photos.find_one({"labels": None, "numId": { "$nin": blacklist_numIds } })
+        if photo == None:
             print("waiting for changes")
             next(coll_photos.watch())
             continue
-        texts = []
-        print(photo_without_texts["numId"])
-        jpeg = coll_files.find_one({"photoId": photo_without_texts["numId"]})
+
+        jpeg = coll_files.find_one({"photoId": photo["numId"]})
         if jpeg == None:
-            print("jpeg %d is missing!" % photo_without_texts["numId"])
+            print("jpeg %d is missing!" % photo["numId"])
             time.sleep(0.1)
             continue
-        blacklist_numIds.append(photo_without_texts["numId"])
-        image = Image.open(io.BytesIO(jpeg["data"]))
-        bounding_box = train_bounding_box(image)
-        if bounding_box != None:
-            image = image.crop(bounding_box)
-            image.save("cropped.jpg", "JPEG")
 
-            # Text detection quality improves a lot with upscaling...
-            image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
-            output = td_model.predict(asarray(image), batch_size=1)
+        try:
+            image = Image.open(io.BytesIO(jpeg["data"]))
+            if photo.get("texts", None) == None:
+                extract_texts(photo, image, coll_photos)
+            if photo.get("labels", None) == None:
+                generate_labels(photo, image, coll_photos)
 
-            text_images = []
+        except Exception as e:
+            print(f"Error processing photo: {e}")
+            blacklist_numIds.append(photo["numId"])
 
-            polygons = []
-
-            for dt_poly in output[0]["dt_polys"]:
-                bb = coords_to_bounding_box(dt_poly)
-                text_images.append(image.crop(coords_to_bounding_box(dt_poly)))
-                i = len(text_images) - 1
-                text_images[i].save(f"cropped_text_{i}.jpg")
-                polygons.append([dt_poly])
-
-            images = [image] * len(polygons)
-            task_names = ["ocr_without_boxes"] * len(polygons)
-
-            predictions_by_image = surya_rec_predictor(
-                images=images,
-                task_names=task_names,
-                polygons=polygons,
-                math_mode=False,
-            )
-            for prediction in predictions_by_image:
-                if prediction.text_lines[0].confidence > 0.6:
-                    print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
-                    texts.append(prediction.text_lines[0].text)
-        else:
-            print("train not found!")
-
-        print("setting texts for photo %d to %s" % (photo_without_texts["numId"], json.dumps(texts)))
-        filter = { "_id": photo_without_texts["_id"] }
-        update_op = { "$set": {"texts": texts } }
-        coll_photos.update_one(filter, update_op)
     client.close()
 
 except Exception as e:

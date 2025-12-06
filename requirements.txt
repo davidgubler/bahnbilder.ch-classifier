@@ -1,10 +1,12 @@
 # you'll also need libgl1
+torchvision
 torch
-transformers==4.49.0
-pillow
+transformers==4.56.1
+pillow==10.4.0
 einops
 timm
 pymongo
 paddlepaddle
 paddleocr
 surya-ocr
+accelerate
