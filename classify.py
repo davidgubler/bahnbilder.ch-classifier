@@ -9,15 +9,8 @@ from pymongo import MongoClient
 from surya.foundation import FoundationPredictor
 from surya.recognition import RecognitionPredictor
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-
-#od_model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-base-ft", dtype="bfloat16", trust_remote_code=True, device_map="cpu").to("cpu")
-#od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base-ft", trust_remote_code=True)
-od_model = Florence2ForConditionalGeneration.from_pretrained("florence-community/Florence-2-large", dtype=torch.bfloat16, device_map="cpu")
-od_processor = AutoProcessor.from_pretrained("florence-community/Florence-2-large")
-#od_model = Florence2ForConditionalGeneration.from_pretrained("microsoft/Florence-2-large", dtype=torch.bfloat16, device_map="cpu")
-#od_processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large")
+od_model = Florence2ForConditionalGeneration.from_pretrained("florence-community/Florence-2-base", dtype=torch.bfloat16, device_map="cpu")
+od_processor = AutoProcessor.from_pretrained("florence-community/Florence-2-base")
 
 td_model = TextDetection(model_name="PP-OCRv5_server_det", limit_side_len=100000)
 
@@ -153,12 +146,13 @@ try:
     blacklist_numIds = []
 
     while True:
+        coll_photos_watch = coll_photos.watch() # start before query to avoid race conditions
         photo = coll_photos.find_one({"texts": None, "numId": { "$nin": blacklist_numIds } })
         if photo == None:
             photo = coll_photos.find_one({"labels": None, "numId": { "$nin": blacklist_numIds } })
         if photo == None:
             print("waiting for changes")
-            next(coll_photos.watch())
+            next(coll_photos_watch)
             continue
 
         jpeg = coll_files.find_one({"photoId": photo["numId"]})
