@@ -90,6 +90,8 @@ def generate_labels(photo, image, coll_photos):
     generate_ids = caption_model.generate(**inputs, max_new_tokens=300, do_sample=True, suppress_tokens=None, use_cache=True, temperature=0.6, top_k=None, top_p=0.9)[0]
     caption = caption_processor.tokenizer.decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
     labels = caption.splitlines()[-1].split(", ")
+    labels = [l.lower().replace("_", " ").strip() for l in labels] # normalize
+    labels = [l for l in labels if l.strip()]                      # remove empty strings
     print("setting labels for photo %d to %s" % (photo["numId"], json.dumps(labels)))
     filter = { "_id": photo["_id"] }
     update_op = { "$set": {"labels": labels } }
