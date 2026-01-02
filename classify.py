@@ -126,6 +126,7 @@ def extract_texts(photo, image, coll_photos):
             if prediction.text_lines[0].confidence > 0.6:
                 print("%s %.2f" % (prediction.text_lines[0].text, prediction.text_lines[0].confidence))
                 texts.append(prediction.text_lines[0].text)
+        texts = [t for t in texts if t.strip()] # remove empty strings
     else:
         print("train not found!")
     print("setting texts for photo %d to %s" % (photo["numId"], json.dumps(texts)))
